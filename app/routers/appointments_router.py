@@ -37,16 +37,37 @@ def book_appointment(
 
     # Race-condition safe atomic booking
     try:
-        appointment = Appointment(
-            slot_id=slot.id,
-            client_id=current_user.id,
-            status=AppointmentStatus.BOOKED
-        )
-        slot.status = SlotStatus.BOOKED
-        session.add(appointment)
-        session.add(slot)
-        session.commit()
-        session.refresh(appointment)
+        existing_appt = session.exec(
+            select(Appointment).where(Appointment.slot_id == slot.id)
+        ).first()
+
+        if existing_appt:
+            if existing_appt.status == AppointmentStatus.BOOKED:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Race Condition Handled: Slot was already booked by another request."
+                )
+            # Reuse cancelled appointment record
+            existing_appt.client_id = current_user.id
+            existing_appt.status = AppointmentStatus.BOOKED
+            existing_appt.created_at = datetime.utcnow()
+            slot.status = SlotStatus.BOOKED
+            session.add(existing_appt)
+            session.add(slot)
+            session.commit()
+            session.refresh(existing_appt)
+            appointment = existing_appt
+        else:
+            appointment = Appointment(
+                slot_id=slot.id,
+                client_id=current_user.id,
+                status=AppointmentStatus.BOOKED
+            )
+            slot.status = SlotStatus.BOOKED
+            session.add(appointment)
+            session.add(slot)
+            session.commit()
+            session.refresh(appointment)
     except IntegrityError:
         session.rollback()
         raise HTTPException(
@@ -78,7 +99,10 @@ def get_my_appointments(
             Slot, Appointment.slot_id == Slot.id
         ).join(
             User, Slot.provider_id == User.id
-        ).where(Appointment.client_id == current_user.id)
+        ).where(
+            Appointment.client_id == current_user.id,
+            Appointment.status != AppointmentStatus.CANCELLED
+        )
         
         results = session.exec(query).all()
         res = []
@@ -105,7 +129,10 @@ def get_my_appointments(
             Slot, Appointment.slot_id == Slot.id
         ).join(
             User, Appointment.client_id == User.id
-        ).where(Slot.provider_id == current_user.id)
+        ).where(
+            Slot.provider_id == current_user.id,
+            Appointment.status != AppointmentStatus.CANCELLED
+        )
         
         results = session.exec(query).all()
         res = []
@@ -252,8 +279,16 @@ def complete_appointment(
     if not slot or slot.provider_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    if appt.status != AppointmentStatus.BOOKED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot mark completed: This appointment was cancelled or modified by the client."
+        )
+
     appt.status = AppointmentStatus.COMPLETED
+    slot.status = SlotStatus.COMPLETED
     session.add(appt)
+    session.add(slot)
     session.commit()
     session.refresh(appt)
 

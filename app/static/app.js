@@ -2,6 +2,7 @@
 let currentUser = null;
 let currentToken = localStorage.getItem('access_token');
 let currentTab = 'open-slots';
+let pollingIntervalId = null;
 
 // Utility Functions
 function showToast(message, type = 'success') {
@@ -35,6 +36,9 @@ async function apiFetch(endpoint, options = {}) {
     logout();
     throw new Error('Session expired. Please log in again.');
   }
+
+  // 204 No Content has no body
+  if (response.status === 204) return {};
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -158,8 +162,12 @@ async function handleAuthSubmit(e) {
 
   try {
     if (isRegisterMode) {
-      const name = document.getElementById('auth-name').value;
+      const name = document.getElementById('auth-name').value.trim();
       const role = document.getElementById('auth-role').value;
+      if (!name) {
+        showToast('Please enter your full name.', 'error');
+        return;
+      }
       await apiFetch('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify({ name, email, password, role })
@@ -210,6 +218,7 @@ function renderDashboard() {
       ${isProvider ? `
         <button class="tab-btn ${currentTab === 'my-slots' ? 'active' : ''}" onclick="switchTab('my-slots')">My Slots</button>
         <button class="tab-btn ${currentTab === 'my-appointments' ? 'active' : ''}" onclick="switchTab('my-appointments')">Booked Appointments</button>
+        <button class="tab-btn ${currentTab === 'my-waitlists' ? 'active' : ''}" onclick="switchTab('my-waitlists')">Waitlist Queues</button>
       ` : `
         <button class="tab-btn ${currentTab === 'open-slots' ? 'active' : ''}" onclick="switchTab('open-slots')">Browse Open Slots</button>
         <button class="tab-btn ${currentTab === 'my-appointments' ? 'active' : ''}" onclick="switchTab('my-appointments')">My Bookings</button>
@@ -297,9 +306,10 @@ function switchTab(tab) {
   renderDashboard();
 }
 
-async function loadTabData() {
+async function loadTabData(silent = false) {
   const container = document.getElementById('tab-content');
-  container.innerHTML = '<div>Loading...</div>';
+  if (!container) return;
+  if (!silent) container.innerHTML = '<div>Loading...</div>';
 
   try {
     if (currentTab === 'open-slots') {
@@ -322,7 +332,11 @@ async function loadTabData() {
             <div class="time-row">⏰ <span>${new Date(s.start_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - ${new Date(s.end_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span></div>
           </div>
           <div class="card-footer">
-            <button class="btn btn-primary btn-sm" style="flex:1" onclick="bookSlot(${s.id})">Book Appointment</button>
+            ${s.status === 'OPEN' ? `
+              <button class="btn btn-primary btn-sm" style="flex:1" onclick="bookSlot(${s.id})">Book Appointment</button>
+            ` : `
+              <button class="btn btn-warning btn-sm" style="flex:1" onclick="joinWaitlist(${s.id})">Join Waitlist</button>
+            `}
           </div>
         </div>
       `).join('');
@@ -348,8 +362,6 @@ async function loadTabData() {
           <div class="card-footer">
             ${s.status === 'OPEN' ? `
               <button class="btn btn-danger btn-sm" style="flex:1" onclick="deleteSlot(${s.id})">Delete Slot</button>
-            ` : s.status === 'BOOKED' ? `
-              <button class="btn btn-warning btn-sm" style="flex:1" onclick="joinWaitlistPrompt(${s.id})">Already Booked</button>
             ` : ''}
           </div>
         </div>
@@ -388,7 +400,8 @@ async function loadTabData() {
     else if (currentTab === 'my-waitlists') {
       const waitlists = await apiFetch('/api/waitlist/my');
       if (waitlists.length === 0) {
-        container.innerHTML = '<div style="color:var(--text-muted); grid-column: 1/-1;">You are not currently in any waitlist.</div>';
+        const msg = currentUser.role === 'PROVIDER' ? 'No clients currently on waitlist for your slots.' : 'You are not currently in any waitlist.';
+        container.innerHTML = `<div style="color:var(--text-muted); grid-column: 1/-1;">${msg}</div>`;
         return;
       }
       container.innerHTML = waitlists.map(w => `
@@ -396,42 +409,38 @@ async function loadTabData() {
           <div class="card-header">
             <div>
               <div class="service-title">${w.service_name}</div>
-              <div class="provider-sub">Provider: ${w.provider_name}</div>
+              <div class="provider-sub">${currentUser.role === 'PROVIDER' ? 'Waiting Client: ' + w.client_name : 'Provider: ' + w.provider_name}</div>
             </div>
-            <span class="status-badge BOOKED">WAITLIST #${w.position}</span>
+            <span class="status-badge BOOKED">QUEUE #${w.position}</span>
           </div>
           <div class="card-body">
             <div class="time-row">📅 <span>${new Date(w.start_time).toLocaleDateString()}</span></div>
             <div class="time-row">⏰ <span>${new Date(w.start_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span></div>
           </div>
-          <div style="font-size:0.85rem; color:var(--text-muted);">
-            If an appointment is cancelled, position #1 gets auto-booked!
+          <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:0.75rem;">
+            ${currentUser.role === 'PROVIDER' ? 'Client will be auto-booked if an active appointment is cancelled.' : 'If an appointment is cancelled, position #1 gets auto-booked!'}
+          </div>
+          <div class="card-footer">
+            <button class="btn btn-danger btn-sm" style="flex:1;" onclick="leaveWaitlist(${w.id})">
+              ${currentUser.role === 'PROVIDER' ? 'Remove from Waitlist' : 'Leave Waitlist'}
+            </button>
           </div>
         </div>
       `).join('');
     }
   } catch (err) {
-    container.innerHTML = `<div style="color:var(--danger)">Failed to load data: ${err.message}</div>`;
+    if (!silent) container.innerHTML = `<div style="color:var(--danger)">Failed to load data: ${err.message}</div>`;
   }
 }
 
-// Action Handlers
 async function bookSlot(slotId) {
   try {
     await apiFetch(`/api/appointments/book/${slotId}`, { method: 'POST' });
     showToast('Appointment booked successfully!');
     switchTab('my-appointments');
   } catch (err) {
-    if (err.message.includes('Race Condition') || err.message.includes('409') || err.message.includes('no longer open')) {
-      showToast(err.message, 'error');
-      // Prompt user to join waitlist instead
-      if (confirm('This slot was just booked! Would you like to join the waitlist for it?')) {
-        joinWaitlist(slotId);
-      }
-    } else {
-      showToast(err.message, 'error');
-    }
-    loadTabData();
+    showToast(err.message, 'error');
+    loadTabData(); // Refresh open slots to reflect latest DB status
   }
 }
 
@@ -442,6 +451,7 @@ async function joinWaitlist(slotId) {
     switchTab('my-waitlists');
   } catch (err) {
     showToast(err.message, 'error');
+    loadTabData();
   }
 }
 
@@ -454,6 +464,7 @@ async function cancelAppointment(apptId) {
     loadNotifications();
   } catch (err) {
     showToast(err.message, 'error');
+    loadTabData();
   }
 }
 
@@ -464,6 +475,7 @@ async function completeAppointment(apptId) {
     loadTabData();
   } catch (err) {
     showToast(err.message, 'error');
+    loadTabData(); // Auto-refresh UI to sync with client cancellation
   }
 }
 
@@ -472,6 +484,17 @@ async function deleteSlot(slotId) {
   try {
     await apiFetch(`/api/slots/${slotId}`, { method: 'DELETE' });
     showToast('Slot deleted.');
+    loadTabData();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function leaveWaitlist(waitlistId) {
+  if (!confirm('Are you sure you want to leave/remove this waitlist position?')) return;
+  try {
+    await apiFetch(`/api/waitlist/${waitlistId}`, { method: 'DELETE' });
+    showToast('Waitlist entry removed.');
     loadTabData();
   } catch (err) {
     showToast(err.message, 'error');
@@ -563,7 +586,11 @@ async function markNotifRead(id) {
 }
 
 function startNotificationPolling() {
-  setInterval(loadNotifications, 10000);
+  if (pollingIntervalId) clearInterval(pollingIntervalId);
+  pollingIntervalId = setInterval(() => {
+    loadNotifications();
+    loadTabData(true); // Live auto-sync across doctor and client tabs
+  }, 4000);
 }
 
 // App Initialization

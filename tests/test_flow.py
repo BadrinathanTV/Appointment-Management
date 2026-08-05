@@ -10,13 +10,17 @@ if os.path.exists("test_appointment_app.db"):
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_appointment_app.db"
 
+from sqlmodel import SQLModel
 from app.main import app
-from app.database import init_db
+from app.database import engine
 
-init_db()
+SQLModel.metadata.drop_all(engine)
+SQLModel.metadata.create_all(engine)
 client = TestClient(app)
 
 def test_full_system_and_race_condition():
+    SQLModel.metadata.drop_all(engine)
+    SQLModel.metadata.create_all(engine)
     # 1. Register Provider
     resp_prov = client.post("/api/auth/register", json={
         "name": "Dr. Smith",

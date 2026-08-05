@@ -10,6 +10,7 @@ class UserRole(str, Enum):
 class SlotStatus(str, Enum):
     OPEN = "OPEN"
     BOOKED = "BOOKED"
+    COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
 
 class AppointmentStatus(str, Enum):

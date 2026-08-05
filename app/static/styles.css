@@ -323,6 +323,11 @@ body {
   color: var(--accent-primary);
 }
 
+.status-badge.CANCELLED {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
 .card-body {
   margin-bottom: 1.25rem;
 }

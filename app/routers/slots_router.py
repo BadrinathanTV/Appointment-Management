@@ -53,11 +53,13 @@ def get_open_slots(
     service: Optional[str] = None,
     session: Session = Depends(get_session)
 ):
-    query = select(Slot, User).join(User, Slot.provider_id == User.id).where(Slot.status == SlotStatus.OPEN)
+    query = select(Slot, User).join(User, Slot.provider_id == User.id).where(
+        Slot.status.in_([SlotStatus.OPEN, SlotStatus.BOOKED])
+    )
     if service:
         query = query.where(Slot.service_name.ilike(f"%{service}%"))
     
-    results = session.exec(query).all()
+    results = session.exec(query.order_by(Slot.start_time.asc())).all()
     slots_out = []
     for slot, provider in results:
         slots_out.append(
